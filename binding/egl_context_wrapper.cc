@@ -45,33 +45,13 @@ EGLContextWrapper::EGLContextWrapper(napi_env env,
 
 void EGLContextWrapper::InitEGL(napi_env env,
                                 const GLContextOptions& context_options) {
-  std::vector<EGLAttrib> display_attributes;
-  display_attributes.push_back(EGL_PLATFORM_ANGLE_TYPE_ANGLE);
-  // Most NVIDIA drivers will not work properly with
-  // EGL_PLATFORM_ANGLE_TYPE_OPENGLES_ANGLE, only enable this option on ARM
-  // devices for now:
-#if defined(__arm__)
-  display_attributes.push_back(EGL_PLATFORM_ANGLE_TYPE_OPENGLES_ANGLE);
-#else
-  display_attributes.push_back(EGL_PLATFORM_ANGLE_TYPE_DEFAULT_ANGLE);
-#endif
+  // JohnnyonFlame: node-gles isn't going to manage the surface/display/context
+  // anymore, we still want to grab these objects to query EGL strings and whatnot.
+  display = eglGetCurrentDisplay();
+  context = eglGetCurrentContext();
+  surface = eglGetCurrentSurface(EGL_DRAW);
 
-  display_attributes.push_back(EGL_NONE);
-
-  display = eglGetPlatformDisplay(EGL_PLATFORM_ANGLE_ANGLE, nullptr,
-                                  &display_attributes[0]);
-  if (display == EGL_NO_DISPLAY) {
-    // TODO(kreeger): This is the default path for Mac OS. Determine why egl has
-    // to be initialized this way on Mac OS.
-    display = eglGetDisplay(EGL_DEFAULT_DISPLAY);
-    if (display == EGL_NO_DISPLAY) {
-      NAPI_THROW_ERROR(env, "No display");
-      return;
-    }
-  }
-
-  EGLint major;
-  EGLint minor;
+  EGLint major, minor;
   if (!eglInitialize(display, &major, &minor)) {
     NAPI_THROW_ERROR(env, "Could not initialize display");
     return;
@@ -79,91 +59,6 @@ void EGLContextWrapper::InitEGL(napi_env env,
 
   egl_extensions = std::unique_ptr<GLExtensionsWrapper>(
       new GLExtensionsWrapper(eglQueryString(display, EGL_EXTENSIONS)));
-#if DEBUG
-  std::cerr << "** EGL_EXTENSIONS:" << std::endl;
-  egl_extensions->LogExtensions();
-  std::cerr << std::endl;
-#endif
-
-  EGLint attrib_list[] = {EGL_SURFACE_TYPE, EGL_PBUFFER_BIT,
-                          EGL_RED_SIZE,     8,
-                          EGL_GREEN_SIZE,   8,
-                          EGL_BLUE_SIZE,    8,
-                          EGL_ALPHA_SIZE,   8,
-                          EGL_DEPTH_SIZE,   24,
-                          EGL_STENCIL_SIZE, 8,
-                          EGL_NONE};
-
-  EGLint num_config;
-  if (!eglChooseConfig(display, attrib_list, &config, 1, &num_config)) {
-    NAPI_THROW_ERROR(env, "Failed creating a config");
-    return;
-  }
-
-  eglBindAPI(EGL_OPENGL_ES_API);
-  if (eglGetError() != EGL_SUCCESS) {
-    NAPI_THROW_ERROR(env, "Failed to set OpenGL ES API");
-    return;
-  }
-
-  EGLint config_renderable_type;
-  if (!eglGetConfigAttrib(display, config, EGL_RENDERABLE_TYPE,
-                          &config_renderable_type)) {
-    NAPI_THROW_ERROR(env, "Failed to get EGL_RENDERABLE_TYPE");
-    return;
-  }
-
-  // If the requested context is ES3 but the config cannot support ES3, request
-  // ES2 instead.
-  EGLint major_version = context_options.client_major_es_version;
-  EGLint minor_version = context_options.client_minor_es_version;
-  if ((config_renderable_type & EGL_OPENGL_ES3_BIT) == 0 &&
-      major_version >= 3) {
-    major_version = 2;
-    minor_version = 0;
-  }
-
-  // Append attributes based on available features
-  std::vector<EGLint> context_attributes;
-
-  context_attributes.push_back(EGL_CONTEXT_MAJOR_VERSION_KHR);
-  context_attributes.push_back(major_version);
-
-  context_attributes.push_back(EGL_CONTEXT_MINOR_VERSION_KHR);
-  context_attributes.push_back(minor_version);
-
-  if (context_options.webgl_compatibility) {
-    context_attributes.push_back(EGL_CONTEXT_WEBGL_COMPATIBILITY_ANGLE);
-    context_attributes.push_back(EGL_TRUE);
-  }
-
-  // TODO(kreeger): This is only needed to avoid validation.
-  // This is needed for OES_TEXTURE_HALF_FLOAT textures uploading as FLOAT
-  context_attributes.push_back(EGL_CONTEXT_OPENGL_NO_ERROR_KHR);
-  context_attributes.push_back(EGL_TRUE);
-
-  context_attributes.push_back(EGL_NONE);
-
-  context = eglCreateContext(display, config, EGL_NO_CONTEXT,
-                             context_attributes.data());
-  if (context == EGL_NO_CONTEXT) {
-    NAPI_THROW_ERROR(env, "Could not create context");
-    return;
-  }
-
-  EGLint surface_attribs[] = {EGL_WIDTH, (EGLint)context_options.width,
-                              EGL_HEIGHT, (EGLint)context_options.height,
-                              EGL_NONE};
-  surface = eglCreatePbufferSurface(display, config, surface_attribs);
-  if (surface == EGL_NO_SURFACE) {
-    NAPI_THROW_ERROR(env, "Could not create surface");
-    return;
-  }
-
-  if (!eglMakeCurrent(display, surface, surface, context)) {
-    NAPI_THROW_ERROR(env, "Could not make context current");
-    return;
-  }
 }
 
 void EGLContextWrapper::BindProcAddresses() {
@@ -450,17 +345,21 @@ void EGLContextWrapper::RefreshGLExtensions() {
   gl_extensions = std::unique_ptr<GLExtensionsWrapper>(new GLExtensionsWrapper(
       reinterpret_cast<const char*>(glGetString(GL_EXTENSIONS))));
 
-  angle_requestable_extensions = std::unique_ptr<GLExtensionsWrapper>(
-      new GLExtensionsWrapper(reinterpret_cast<const char*>(
-          glGetString(GL_REQUESTABLE_EXTENSIONS_ANGLE))));
+  // We don't want ANGLE any longer...
+  angle_requestable_extensions = std::unique_ptr<GLExtensionsWrapper>(new GLExtensionsWrapper(
+      reinterpret_cast<const char*>("")));
 }
 
 EGLContextWrapper::~EGLContextWrapper() {
   if (context) {
+    // JohnnyonFlame: We don't own any of those EGL objects anymore,
+    // so don't destroy them.
+#if 0
     if (!eglDestroyContext(display, context)) {
       std::cerr << "Failed to delete EGL context: " << std::endl;
     }
     context = nullptr;
+#endif
   }
 
   // TODO(kreeger): Close context attributes.
