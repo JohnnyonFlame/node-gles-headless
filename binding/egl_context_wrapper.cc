@@ -51,12 +51,6 @@ void EGLContextWrapper::InitEGL(napi_env env,
   context = eglGetCurrentContext();
   surface = eglGetCurrentSurface(EGL_DRAW);
 
-  EGLint major, minor;
-  if (!eglInitialize(display, &major, &minor)) {
-    NAPI_THROW_ERROR(env, "Could not initialize display");
-    return;
-  }
-
   egl_extensions = std::unique_ptr<GLExtensionsWrapper>(
       new GLExtensionsWrapper(eglQueryString(display, EGL_EXTENSIONS)));
 }
