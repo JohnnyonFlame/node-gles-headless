@@ -29,9 +29,8 @@
       'binding/webgl_sync.cc'
     ],
     'include_dirs' : [
-      '..',
-      '<(module_root_dir)/deps',
-      '<(module_root_dir)/deps/angle/include'
+	'.',
+	'..'
     ],
     'conditions' : [
       [
